@@ -180,24 +180,25 @@ impl Headers {
 impl TryFrom<http_02x::HeaderMap> for Headers {
     type Error = HttpError;
 
+    /// This function attempts to parse header bytes as UTF-8. If that fails we
+    /// try to parse the header value as an ISO 8859 string. Our strategy for parsing
+    /// as 8859 is infallible since it casts each `u8` to a `char` which reinterprets
+    /// it as a UTF-8 codepoint. This works for all 256 possible values of `u8` and
+    /// leaves us with a UTF-8 `String` (with possibly different bytes than the ones
+    /// sent over the wire).
     fn try_from(value: http_02x::HeaderMap) -> Result<Self, Self::Error> {
-        if let Some(utf8_error) = value.iter().find_map(|(k, v)| {
-            std::str::from_utf8(v.as_bytes())
-                .err()
-                .map(|err| NonUtf8Header::new(k.as_str().to_owned(), v.as_bytes().to_vec(), err))
-        }) {
-            Err(HttpError::non_utf8_header(utf8_error))
-        } else {
-            let mut string_safe_headers: http_02x::HeaderMap<HeaderValue> = Default::default();
-            string_safe_headers.extend(
-                value
-                    .into_iter()
-                    .map(|(k, v)| (k, HeaderValue::from_http02x(v).expect("validated above"))),
+        let mut string_safe_headers: http_02x::HeaderMap<HeaderValue> = Default::default();
+        value.iter().for_each(|(k, v)| {
+            let new_value = HeaderValue::from_http02x(v.clone()).unwrap_or(
+                HeaderValue::from_str(iso_8859_to_string(v.as_bytes()).as_str())
+                    .expect("Header should be either UTF-8 or ISO 8859"),
             );
-            Ok(Headers {
-                headers: string_safe_headers,
-            })
-        }
+            string_safe_headers.insert(k, new_value);
+        });
+
+        Ok(Headers {
+            headers: string_safe_headers,
+        })
     }
 }
 
@@ -205,28 +206,28 @@ impl TryFrom<http_02x::HeaderMap> for Headers {
 impl TryFrom<http_1x::HeaderMap> for Headers {
     type Error = HttpError;
 
+    /// This function attempts to parse header bytes as UTF-8. If that fails we
+    /// try to parse the header value as an ISO 8859 string. Our strategy for parsing
+    /// as 8859 is infallible since it casts each `u8` to a `char` which reinterprets
+    /// it as a UTF-8 codepoint. This works for all 256 possible values of `u8` and
+    /// leaves us with a UTF-8 `String` (with possibly different bytes than the ones
+    /// sent over the wire).
     fn try_from(value: http_1x::HeaderMap) -> Result<Self, Self::Error> {
-        if let Some(utf8_error) = value.iter().find_map(|(k, v)| {
-            std::str::from_utf8(v.as_bytes())
-                .err()
-                .map(|err| NonUtf8Header::new(k.as_str().to_owned(), v.as_bytes().to_vec(), err))
-        }) {
-            Err(HttpError::non_utf8_header(utf8_error))
-        } else {
-            let mut string_safe_headers: http_02x::HeaderMap<HeaderValue> = Default::default();
-            string_safe_headers.extend(value.into_iter().map(|(k, v)| {
-                (
-                    k.map(|v| {
-                        http_02x::HeaderName::from_bytes(v.as_str().as_bytes())
-                            .expect("known valid")
-                    }),
-                    HeaderValue::from_http1x(v).expect("validated above"),
-                )
-            }));
-            Ok(Headers {
-                headers: string_safe_headers,
-            })
-        }
+        let mut string_safe_headers: http_02x::HeaderMap<HeaderValue> = Default::default();
+        value.iter().for_each(|(k, v)| {
+            let new_value = HeaderValue::from_http1x(v.clone()).unwrap_or(
+                HeaderValue::from_str(iso_8859_to_string(v.as_bytes()).as_str())
+                    .expect("Header should be either UTF-8 or ISO 8859"),
+            );
+            let new_key =
+                http_02x::HeaderName::from_bytes(k.as_str().as_bytes()).expect("known valid");
+
+            string_safe_headers.insert(new_key, new_value);
+        });
+
+        Ok(Headers {
+            headers: string_safe_headers,
+        })
     }
 }
 
@@ -467,6 +468,12 @@ fn header_value(value: MaybeStatic, panic_safe: bool) -> Result<HeaderValue, Htt
     HeaderValue::from_http02x(header)
 }
 
+/// Interpret each byte as a unicode codepoint and then build a `String` from these codepoints
+#[allow(dead_code)]
+fn iso_8859_to_string(s: &[u8]) -> String {
+    s.iter().map(|&c| c as char).collect::<String>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,6 +554,80 @@ mod tests {
                 http_02x::HeaderValue::from_bytes(&[0xC0, 0x80]).unwrap()
             )
             .is_err());
+    }
+
+    #[test]
+    fn iso_8859_header_parses_correctly_from_http_1x() {
+        // Contains the ISO-8859 single byte multiplication symbol 215
+        let iso_8859_header_bytes: &[u8] = &[
+            105, 110, 108, 105, 110, 101, 59, 32, 102, 105, 108, 101, 110, 97, 109, 101, 61, 115,
+            97, 109, 112, 108, 101, 95, 54, 52, 48, 215, 52, 50, 54, 46, 106, 112, 101, 103,
+        ];
+
+        // This replaces the ISO-8859 single byte multiplication character with the two byte
+        // UTF-8 codepoint `[195, 151]` for the multiplication symbol
+        let utf8_header_bytes: &[u8] = &[
+            105, 110, 108, 105, 110, 101, 59, 32, 102, 105, 108, 101, 110, 97, 109, 101, 61, 115,
+            97, 109, 112, 108, 101, 95, 54, 52, 48, 195, 151, 52, 50, 54, 46, 106, 112, 101, 103,
+        ];
+
+        let mut http_1_headers = http_1x::HeaderMap::new();
+
+        let header_value =
+            http_1x::HeaderValue::from_bytes(iso_8859_header_bytes).expect("valid header bytes");
+        http_1_headers.insert("content-disposition", header_value);
+
+        let aws_headers = Headers::try_from(http_1_headers);
+
+        assert!(aws_headers.is_ok());
+
+        let aws_headers = aws_headers.unwrap();
+
+        let parsed_header_bytes = aws_headers
+            .headers
+            .get("content-disposition")
+            .unwrap()
+            .as_str()
+            .as_bytes();
+
+        assert_eq!(parsed_header_bytes, utf8_header_bytes);
+    }
+
+    #[test]
+    fn iso_8859_header_parses_correctly_from_http_02x() {
+        // Contains the ISO-8859 single byte multiplication symbol 215
+        let iso_8859_header_bytes: &[u8] = &[
+            105, 110, 108, 105, 110, 101, 59, 32, 102, 105, 108, 101, 110, 97, 109, 101, 61, 115,
+            97, 109, 112, 108, 101, 95, 54, 52, 48, 215, 52, 50, 54, 46, 106, 112, 101, 103,
+        ];
+
+        // This replaces the ISO-8859 single byte multiplication character with the two byte
+        // UTF-8 codepoint `[195, 151]` for the multiplication symbol
+        let utf8_header_bytes: &[u8] = &[
+            105, 110, 108, 105, 110, 101, 59, 32, 102, 105, 108, 101, 110, 97, 109, 101, 61, 115,
+            97, 109, 112, 108, 101, 95, 54, 52, 48, 195, 151, 52, 50, 54, 46, 106, 112, 101, 103,
+        ];
+
+        let mut http_02_headers = http_02x::HeaderMap::new();
+
+        let header_value =
+            http_02x::HeaderValue::from_bytes(iso_8859_header_bytes).expect("valid header bytes");
+        http_02_headers.insert("content-disposition", header_value);
+
+        let aws_headers = Headers::try_from(http_02_headers);
+
+        assert!(aws_headers.is_ok());
+
+        let aws_headers = aws_headers.unwrap();
+
+        let parsed_header_bytes = aws_headers
+            .headers
+            .get("content-disposition")
+            .unwrap()
+            .as_str()
+            .as_bytes();
+
+        assert_eq!(parsed_header_bytes, utf8_header_bytes);
     }
 
     proptest::proptest! {
