@@ -540,7 +540,7 @@ class RustJmespathShapeTraversalGeneratorTest {
             rust("assert_eq!(1, result.len());")
         }
         test("boollit_continued_empty", "lists.structs[?`true`].integer") {
-            rust("assert_eq!(0, result.len());")
+            rust("assert_eq!(1, result.len());")
         }
         test("boollit_continued", "lists.structs[?`true`].primitives.integer") {
             rust("assert_eq!(1, result.len());")

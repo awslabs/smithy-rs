@@ -795,11 +795,15 @@ class RustJmespathShapeTraversalGenerator(
             if (expr.right is CurrentExpression) {
                 left.copy(
                     outputType =
-                        left.outputType.collectionValue().asRef(),
+                        if (left.isArray()) {
+                            RustType.Vec(left.outputType.collectionValue().asRef())
+                        } else {
+                            RustType.Vec(left.outputType.asRef())
+                        },
                     output = writable {},
                 )
             } else {
-                generate(expr.right, listOf(TraversalBinding.Global("_v", leftTarget)), context)
+                generate(expr.right, listOf(TraversalBinding.Global("_v", leftTarget)), context.copy(retainOption = true))
             }
 
         val comparison = generate(expr.comparison, listOf(TraversalBinding.Global("_v", leftTarget)), context)
@@ -807,11 +811,26 @@ class RustJmespathShapeTraversalGenerator(
             throw InvalidJmesPathTraversalException("The filter expression comparison must result in a boolean")
         }
 
+        val (projectionType, flattenNeeded) =
+            when {
+                right.isArray() -> right.outputType.stripOuter<RustType.Reference>() to true
+                else -> RustType.Vec(right.outputType.asRef()) to false
+            }
+
         return safeNamer.safeName("_fprj").let { ident ->
             GeneratedExpression(
                 identifier = ident,
                 outputShape = TraversedShape.Array(null, right.outputShape),
-                outputType = RustType.Vec(right.outputType),
+                outputType =
+                    if (projectionType is RustType.Vec) {
+                        if (projectionType.member is RustType.Option) {
+                            RustType.Vec((projectionType.member as RustType.Option).member)
+                        } else {
+                            projectionType
+                        }
+                    } else {
+                        projectionType
+                    },
                 output =
                     left.output +
                         writable {
@@ -830,15 +849,29 @@ class RustJmespathShapeTraversalGenerator(
                             if (expr.right !is CurrentExpression) {
                                 withBlock(".flat_map({", "})") {
                                     rustBlockTemplate(
-                                        "fn map(_v: &#{Left}) -> #{Option}<#{Right}>",
+                                        if (right.outputType is RustType.Option) {
+                                            "fn map(_v: &#{Left}) -> #{Right}"
+                                        } else {
+                                            "fn map(_v: &#{Left}) -> #{Option}<#{Right}>"
+                                        },
                                         *preludeScope,
                                         "Left" to leftTargetSym,
                                         "Right" to right.outputType,
                                     ) {
                                         right.output(this)
-                                        rustTemplate("#{Some}(${right.identifier})", *preludeScope)
+                                        if (right.outputType is RustType.Option) {
+                                            rustTemplate(right.identifier)
+                                        } else {
+                                            rustTemplate("#{Some}(${right.identifier})", *preludeScope)
+                                        }
                                     }
                                     rust("map")
+                                }
+                                if (flattenNeeded) {
+                                    rust(".flatten()")
+                                    if (right.outputType is RustType.Vec && right.outputType.member is RustType.Option) {
+                                        rust(".flatten()")
+                                    }
                                 }
                             }
                             rustTemplate(".collect::<#{Vec}<_>>();", *preludeScope)
