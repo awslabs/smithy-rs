@@ -36,6 +36,7 @@ import software.amazon.smithy.model.shapes.StringShape
 import software.amazon.smithy.model.shapes.StructureShape
 import software.amazon.smithy.model.traits.EnumTrait
 import software.amazon.smithy.rust.codegen.client.smithy.ClientCodegenContext
+import software.amazon.smithy.rust.codegen.core.rustlang.Attribute
 import software.amazon.smithy.rust.codegen.core.rustlang.RustType
 import software.amazon.smithy.rust.codegen.core.rustlang.SafeNamer
 import software.amazon.smithy.rust.codegen.core.rustlang.Writable
@@ -254,6 +255,11 @@ sealed class TraversalBinding {
 typealias TraversalBindings = List<TraversalBinding>
 
 /**
+ * Bag of metadata accessible from the generate* methods that can affect how Rust JmesPath expression code should be generated.
+ */
+data class TraversalContext(val retainOption: Boolean)
+
+/**
  * Indicates a feature that's part of the JmesPath spec, but that we explicitly decided
  * not to support in smithy-rs due to the complexity of code generating it for Rust.
  */
@@ -292,24 +298,25 @@ class RustJmespathShapeTraversalGenerator(
     fun generate(
         expr: JmespathExpression,
         bindings: TraversalBindings,
+        context: TraversalContext,
     ): GeneratedExpression {
         fun String.attachExpression() =
             this.substringBefore("\nExpression:") + "\nExpression: ${ExpressionSerializer().serialize(expr)}"
         try {
             val result =
                 when (expr) {
-                    is ComparatorExpression -> generateComparator(expr, bindings)
-                    is FunctionExpression -> generateFunction(expr, bindings)
-                    is FieldExpression -> generateField(expr, bindings)
+                    is ComparatorExpression -> generateComparator(expr, bindings, context)
+                    is FunctionExpression -> generateFunction(expr, bindings, context)
+                    is FieldExpression -> generateField(expr, bindings, context)
                     is LiteralExpression -> generateLiteral(expr)
-                    is MultiSelectListExpression -> generateMultiSelectList(expr, bindings)
-                    is AndExpression -> generateAnd(expr, bindings)
-                    is OrExpression -> generateOr(expr, bindings)
-                    is NotExpression -> generateNot(expr, bindings)
-                    is ObjectProjectionExpression -> generateObjectProjection(expr, bindings)
-                    is FilterProjectionExpression -> generateFilterProjection(expr, bindings)
-                    is ProjectionExpression -> generateProjection(expr, bindings)
-                    is Subexpression -> generateSubexpression(expr, bindings)
+                    is MultiSelectListExpression -> generateMultiSelectList(expr, bindings, context)
+                    is AndExpression -> generateAnd(expr, bindings, context)
+                    is OrExpression -> generateOr(expr, bindings, context)
+                    is NotExpression -> generateNot(expr, bindings, context)
+                    is ObjectProjectionExpression -> generateObjectProjection(expr, bindings, context)
+                    is FilterProjectionExpression -> generateFilterProjection(expr, bindings, context)
+                    is ProjectionExpression -> generateProjection(expr, bindings, context)
+                    is Subexpression -> generateSubexpression(expr, bindings, context)
                     is CurrentExpression -> throw JmesPathTraversalCodegenBugException("current expression must be handled in each expression type that can have one")
                     is ExpressionTypeExpression -> throw UnsupportedJmesPathException("Expression type expressions are not supported by smithy-rs")
                     is IndexExpression -> throw UnsupportedJmesPathException("Index expressions are not supported by smithy-rs")
@@ -338,15 +345,17 @@ class RustJmespathShapeTraversalGenerator(
     private fun generateComparator(
         expr: ComparatorExpression,
         bindings: TraversalBindings,
+        context: TraversalContext,
     ): GeneratedExpression {
-        val left = generate(expr.left, bindings)
-        val right = generate(expr.right, bindings)
+        val left = generate(expr.left, bindings, context.copy(retainOption = false))
+        val right = generate(expr.right, bindings, context.copy(retainOption = false))
         return generateCompare(safeNamer, left, right, expr.comparator.toString())
     }
 
     private fun generateFunction(
         expr: FunctionExpression,
         bindings: TraversalBindings,
+        context: TraversalContext,
     ): GeneratedExpression {
         val ident = safeNamer.safeName("_ret")
         return when (expr.name) {
@@ -354,7 +363,7 @@ class RustJmespathShapeTraversalGenerator(
                 if (expr.arguments.size != 1) {
                     throw InvalidJmesPathTraversalException("Length function takes exactly one argument")
                 }
-                val arg = generate(expr.arguments[0], bindings)
+                val arg = generate(expr.arguments[0], bindings, context)
                 if (!arg.isArray() && !arg.isString()) {
                     throw InvalidJmesPathTraversalException("Argument to `length` function must be a collection or string type")
                 }
@@ -374,14 +383,14 @@ class RustJmespathShapeTraversalGenerator(
                 if (expr.arguments.size != 2) {
                     throw InvalidJmesPathTraversalException("Contains function takes exactly two arguments")
                 }
-                val left = generate(expr.arguments[0], bindings)
+                val left = generate(expr.arguments[0], bindings, context)
                 if (!left.isArray() && !left.isString()) {
                     throw InvalidJmesPathTraversalException("First argument to `contains` function must be a collection or string type")
                 }
                 if (expr.arguments[1].isLiteralNull()) {
                     throw UnsupportedJmesPathException("Checking for null with `contains` is not supported in smithy-rs")
                 }
-                val right = generate(expr.arguments[1], bindings)
+                val right = generate(expr.arguments[1], bindings, context)
                 if (!right.isBool() && !right.isNumber() && !right.isString() && !right.isEnum()) {
                     throw UnsupportedJmesPathException("Checking for anything other than booleans, numbers, strings, or enums in the `contains` function is not supported in smithy-rs")
                 }
@@ -415,7 +424,8 @@ class RustJmespathShapeTraversalGenerator(
                                                     outputType =
                                                         RustType.Reference(
                                                             lifetime = null,
-                                                            member = left.outputType.collectionValue(),
+                                                            member =
+                                                                left.outputType.collectionValue(),
                                                         ),
                                                     output = writable {},
                                                 ),
@@ -435,7 +445,7 @@ class RustJmespathShapeTraversalGenerator(
                 if (expr.arguments.size != 1) {
                     throw InvalidJmesPathTraversalException("Keys function takes exactly one argument")
                 }
-                val arg = generate(expr.arguments[0], bindings)
+                val arg = generate(expr.arguments[0], bindings, context)
                 if (!arg.isObject()) {
                     throw InvalidJmesPathTraversalException("Argument to `keys` function must be an object type")
                 }
@@ -446,8 +456,7 @@ class RustJmespathShapeTraversalGenerator(
                     output =
                         writable {
                             arg.output(this)
-                            val outputShape = arg.outputShape.shape
-                            when (outputShape) {
+                            when (val outputShape = arg.outputShape.shape) {
                                 is StructureShape -> {
                                     // Can't iterate a struct in Rust so source the keys from smithy
                                     val keys =
@@ -473,6 +482,7 @@ class RustJmespathShapeTraversalGenerator(
     private fun generateField(
         expr: FieldExpression,
         bindings: TraversalBindings,
+        context: TraversalContext,
     ): GeneratedExpression {
         val globalBinding = bindings.find { it is TraversalBinding.Global }
         val namedBinding = bindings.find { it is TraversalBinding.Named && it.jmespathName == expr.name }
@@ -495,21 +505,43 @@ class RustJmespathShapeTraversalGenerator(
             val targetSym = symbolProvider.toSymbol(target)
 
             val ident = safeNamer.safeName("_fld")
-            return GeneratedExpression(
-                identifier = ident,
-                outputShape = TraversedShape.from(model, target),
-                outputType = targetSym.rustType().asRef(),
-                output =
-                    writable {
-                        rust(
-                            if (memberSym.isOptional()) {
-                                "let $ident = ${globalBinding.rustName}.${memberSym.name}.as_ref()?;"
-                            } else {
-                                "let $ident = &${globalBinding.rustName}.${memberSym.name};"
-                            },
-                        )
-                    },
-            )
+            if (context.retainOption) {
+                return GeneratedExpression(
+                    identifier = ident,
+                    outputShape = TraversedShape.from(model, target),
+                    outputType = RustType.Option(targetSym.rustType().asRef()),
+                    output =
+                        writable {
+                            rust(
+                                if (globalBinding.rustName.startsWith("_fld")) {
+                                    if (memberSym.isOptional()) {
+                                        "let $ident = ${globalBinding.rustName}.and_then(|v| v.${memberSym.name}.as_ref());"
+                                    } else {
+                                        "let $ident = ${globalBinding.rustName}.map(|v| &v.${memberSym.name});"
+                                    }
+                                } else {
+                                    "let $ident = ${globalBinding.rustName}.${memberSym.name}.as_ref();"
+                                },
+                            )
+                        },
+                )
+            } else {
+                return GeneratedExpression(
+                    identifier = ident,
+                    outputShape = TraversedShape.from(model, target),
+                    outputType = targetSym.rustType().asRef(),
+                    output =
+                        writable {
+                            rust(
+                                if (memberSym.isOptional()) {
+                                    "let $ident = ${globalBinding.rustName}.${memberSym.name}.as_ref()?;"
+                                } else {
+                                    "let $ident = &${globalBinding.rustName}.${memberSym.name};"
+                                },
+                            )
+                        },
+                )
+            }
         } else if (namedBinding != null || globalBinding != null) {
             throw InvalidJmesPathTraversalException("Cannot look up fields in non-struct shapes")
         } else {
@@ -566,10 +598,11 @@ class RustJmespathShapeTraversalGenerator(
     private fun generateMultiSelectList(
         expr: MultiSelectListExpression,
         bindings: TraversalBindings,
+        context: TraversalContext,
     ): GeneratedExpression {
         val expressions =
             expr.expressions.map { subexpr ->
-                generate(subexpr, bindings)
+                generate(subexpr, bindings, context)
             }
         // If we wanted to support mixed-types, we would need to use tuples, add tuple support to RustType,
         // and update supported functions such as `contains` to operate on tuples.
@@ -596,20 +629,23 @@ class RustJmespathShapeTraversalGenerator(
     private fun generateAnd(
         expr: AndExpression,
         bindings: TraversalBindings,
-    ): GeneratedExpression = generateBooleanOp(expr, "&&", bindings)
+        context: TraversalContext,
+    ): GeneratedExpression = generateBooleanOp(expr, "&&", bindings, context)
 
     private fun generateOr(
         expr: OrExpression,
         bindings: TraversalBindings,
-    ): GeneratedExpression = generateBooleanOp(expr, "||", bindings)
+        context: TraversalContext,
+    ): GeneratedExpression = generateBooleanOp(expr, "||", bindings, context)
 
     private fun generateBooleanOp(
         expr: BinaryExpression,
         op: String,
         bindings: TraversalBindings,
+        context: TraversalContext,
     ): GeneratedExpression {
-        val left = generate(expr.left, bindings)
-        val right = generate(expr.right, bindings)
+        val left = generate(expr.left, bindings, context)
+        val right = generate(expr.right, bindings, context)
         if (!left.isBool() || !right.isBool()) {
             throw UnsupportedJmesPathException("Applying the `$op` operation doesn't support non-boolean types in smithy-rs")
         }
@@ -632,8 +668,9 @@ class RustJmespathShapeTraversalGenerator(
     private fun generateNot(
         expr: NotExpression,
         bindings: TraversalBindings,
+        context: TraversalContext,
     ): GeneratedExpression {
-        val inner = generate(expr.expression, bindings)
+        val inner = generate(expr.expression, bindings, context)
         if (!inner.isBool()) {
             throw UnsupportedJmesPathException("Negation of a non-boolean type is not supported by smithy-rs")
         }
@@ -655,15 +692,17 @@ class RustJmespathShapeTraversalGenerator(
     private fun generateProjection(
         expr: ProjectionExpression,
         bindings: TraversalBindings,
+        context: TraversalContext,
     ): GeneratedExpression {
         val maybeFlatten = expr.left
         if (maybeFlatten is SliceExpression) {
             throw UnsupportedJmesPathException("Slice expressions are not supported by smithy-rs")
         }
-        if (maybeFlatten !is FlattenExpression) {
-            throw UnsupportedJmesPathException("Only projection expressions with flattens are supported by smithy-rs")
-        }
-        val left = generate(maybeFlatten.expression, bindings)
+        val left =
+            when (maybeFlatten) {
+                is FlattenExpression -> generate(maybeFlatten.expression, bindings, context)
+                else -> generate(expr.left, bindings, context)
+            }
         val leftTarget =
             (
                 left.outputShape as? TraversedShape.Array
@@ -676,7 +715,8 @@ class RustJmespathShapeTraversalGenerator(
             return left
         }
 
-        val right = generate(expr.right, listOf(TraversalBinding.Global("v", leftTarget)))
+        val right =
+            generate(expr.right, listOf(TraversalBinding.Global("v", leftTarget)), context.copy(retainOption = true))
 
         // If the right expression results in a collection type, then the resulting vec will need to get flattened.
         // Otherwise, you'll get `Vec<&Vec<T>>` instead of `Vec<&T>`, which causes later projections to fail to compile.
@@ -690,25 +730,47 @@ class RustJmespathShapeTraversalGenerator(
             GeneratedExpression(
                 identifier = ident,
                 outputShape = right.outputShape,
-                outputType = projectionType,
+                outputType =
+                    if (projectionType is RustType.Vec) {
+                        if (projectionType.member is RustType.Option) {
+                            RustType.Vec((projectionType.member as RustType.Option).member)
+                        } else {
+                            projectionType
+                        }
+                    } else {
+                        projectionType
+                    },
                 output =
                     left.output +
                         writable {
                             rust("let $ident = ${left.identifier}.iter()")
                             withBlock(".flat_map(|v| {", "})") {
+                                Attribute.AllowClippyLetAndReturn.render(this)
                                 rustBlockTemplate(
-                                    "fn map(v: &#{Left}) -> #{Option}<#{Right}>",
+                                    // map has to have Option since the map function body can have ?
+                                    if (right.outputType is RustType.Option) {
+                                        "fn map(v: &#{Left}) -> #{Right}"
+                                    } else {
+                                        "fn map(v: &#{Left}) -> #{Option}<#{Right}>"
+                                    },
                                     *preludeScope,
                                     "Left" to leftTargetSym,
                                     "Right" to right.outputType,
                                 ) {
                                     right.output(this)
-                                    rustTemplate("#{Some}(${right.identifier})", *preludeScope)
+                                    if (right.outputType is RustType.Option) {
+                                        rustTemplate(right.identifier)
+                                    } else {
+                                        rustTemplate("#{Some}(${right.identifier})", *preludeScope)
+                                    }
                                 }
                                 rust("map(v)")
                             }
                             if (flattenNeeded) {
                                 rust(".flatten()")
+                                if (right.outputType is RustType.Vec && right.outputType.member is RustType.Option) {
+                                    rust(".flatten()")
+                                }
                             }
                             rustTemplate(".collect::<#{Vec}<_>>();", *preludeScope)
                         },
@@ -719,8 +781,9 @@ class RustJmespathShapeTraversalGenerator(
     private fun generateFilterProjection(
         expr: FilterProjectionExpression,
         bindings: TraversalBindings,
+        context: TraversalContext,
     ): GeneratedExpression {
-        val left = generate(expr.left, bindings)
+        val left = generate(expr.left, bindings, context)
         if (!left.isArray()) {
             throw UnsupportedJmesPathException("Filter projections can only be done on lists or sets in smithy-rs")
         }
@@ -731,14 +794,15 @@ class RustJmespathShapeTraversalGenerator(
         val right =
             if (expr.right is CurrentExpression) {
                 left.copy(
-                    outputType = left.outputType.collectionValue().asRef(),
+                    outputType =
+                        left.outputType.collectionValue().asRef(),
                     output = writable {},
                 )
             } else {
-                generate(expr.right, listOf(TraversalBinding.Global("_v", leftTarget)))
+                generate(expr.right, listOf(TraversalBinding.Global("_v", leftTarget)), context)
             }
 
-        val comparison = generate(expr.comparison, listOf(TraversalBinding.Global("_v", leftTarget)))
+        val comparison = generate(expr.comparison, listOf(TraversalBinding.Global("_v", leftTarget)), context)
         if (!comparison.isBool()) {
             throw InvalidJmesPathTraversalException("The filter expression comparison must result in a boolean")
         }
@@ -786,11 +850,12 @@ class RustJmespathShapeTraversalGenerator(
     private fun generateObjectProjection(
         expr: ObjectProjectionExpression,
         bindings: TraversalBindings,
+        context: TraversalContext,
     ): GeneratedExpression {
         if (expr.left is CurrentExpression) {
             throw UnsupportedJmesPathException("Object projection cannot be done on computed maps in smithy-rs")
         }
-        val left = generate(expr.left, bindings)
+        val left = generate(expr.left, bindings, context)
         if (!left.outputType.isMap()) {
             throw UnsupportedJmesPathException("Object projection is only supported on map types in smithy-rs")
         }
@@ -804,11 +869,12 @@ class RustJmespathShapeTraversalGenerator(
         val right =
             if (expr.right is CurrentExpression) {
                 left.copy(
-                    outputType = left.outputType.collectionValue().asRef(),
+                    outputType =
+                        left.outputType.collectionValue().asRef(),
                     output = writable {},
                 )
             } else {
-                generate(expr.right, listOf(TraversalBinding.Global("_v", TraversedShape.from(model, leftTarget))))
+                generate(expr.right, listOf(TraversalBinding.Global("_v", TraversedShape.from(model, leftTarget))), context)
             }
 
         val ident = safeNamer.safeName("_oprj")
@@ -843,9 +909,10 @@ class RustJmespathShapeTraversalGenerator(
     private fun generateSubexpression(
         expr: Subexpression,
         bindings: TraversalBindings,
+        context: TraversalContext,
     ): GeneratedExpression {
-        val left = generate(expr.left, bindings)
-        val right = generate(expr.right, listOf(TraversalBinding.Global(left.identifier, left.outputShape)))
+        val left = generate(expr.left, bindings, context)
+        val right = generate(expr.right, listOf(TraversalBinding.Global(left.identifier, left.outputShape)), context)
         return GeneratedExpression(
             identifier = right.identifier,
             outputShape = right.outputShape,

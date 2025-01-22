@@ -50,6 +50,8 @@ class RustJmespathShapeTraversalGeneratorTest {
         val entityMaps = symbolProvider.toSymbol(model.lookup<StructureShape>("test#EntityMaps"))
         val enum = symbolProvider.toSymbol(model.lookup<Shape>("test#Enum"))
         val struct = symbolProvider.toSymbol(model.lookup<Shape>("test#Struct"))
+        val subStruct = symbolProvider.toSymbol(model.lookup<Shape>("test#SubStruct"))
+        val traversalContext = TraversalContext(retainOption = false)
 
         val testInputDataFn: RuntimeType
         val testOutputDataFn: RuntimeType
@@ -126,6 +128,7 @@ class RustJmespathShapeTraversalGeneratorTest {
                         "EntityMaps" to entityMaps,
                         "Enum" to enum,
                         "Struct" to struct,
+                        "SubStruct" to subStruct,
                     )
                 }
         }
@@ -150,7 +153,7 @@ class RustJmespathShapeTraversalGeneratorTest {
 
                     else -> listOf(TraversalBinding.Global("_output", TraversedShape.from(model, outputShape)))
                 }
-            val generated = generator.generate(parsed, bindings)
+            val generated = generator.generate(parsed, bindings, traversalContext)
             rustCrate.unitTest(testName) {
                 rust("// jmespath: $expression")
                 rust("// jmespath parsed: $parsed")
@@ -194,7 +197,7 @@ class RustJmespathShapeTraversalGeneratorTest {
 
                         else -> listOf(TraversalBinding.Global("_output", TraversedShape.from(model, outputShape)))
                     }
-                generator.generate(parsed, bindings).output(RustWriter.forModule("unsupported"))
+                generator.generate(parsed, bindings, traversalContext).output(RustWriter.forModule("unsupported"))
                 fail("expression '$expression' should have thrown InvalidJmesPathTraversalException")
             } catch (ex: InvalidJmesPathTraversalException) {
                 ex.message shouldContain contains
@@ -211,6 +214,7 @@ class RustJmespathShapeTraversalGeneratorTest {
                 generator.generate(
                     parsed,
                     listOf(TraversalBinding.Global("_output", TraversedShape.from(model, outputShape))),
+                    traversalContext,
                 ).output(RustWriter.forModule("unsupported"))
                 fail("expression '$expression' should have thrown UnsupportedJmesPathException")
             } catch (ex: UnsupportedJmesPathException) {
@@ -233,6 +237,9 @@ class RustJmespathShapeTraversalGeneratorTest {
     private val expectFalse = simple("assert_eq!(false, result);")
     private val expectTrue = simple("assert!(result);")
     private val itCompiles = simple("")
+
+    @Test
+    fun single() = integrationTest { wildcardExpressions() }
 
     @Test
     fun all() =
@@ -317,6 +324,17 @@ class RustJmespathShapeTraversalGeneratorTest {
             "Member `doesNotExist` doesn't exist",
             dualBinding = true,
         )
+    }
+
+    private fun TestCase.wildcardExpressions() {
+        fun test(
+            name: String,
+            expression: String,
+            assertions: RustWriter.() -> Unit,
+        ) = testCase("wildcard_$name", expression, assertions)
+
+        test("basic_case", "lists.structs[*].[primitives.string, string]") {
+        }
     }
 
     private fun TestCase.flattenExpressions() {

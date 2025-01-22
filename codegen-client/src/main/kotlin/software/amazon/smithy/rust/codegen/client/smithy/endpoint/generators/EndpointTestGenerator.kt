@@ -18,7 +18,6 @@ import software.amazon.smithy.rulesengine.traits.ExpectedEndpoint
 import software.amazon.smithy.rust.codegen.client.smithy.ClientCodegenContext
 import software.amazon.smithy.rust.codegen.client.smithy.endpoint.Types
 import software.amazon.smithy.rust.codegen.client.smithy.endpoint.rustName
-import software.amazon.smithy.rust.codegen.client.smithy.generators.ClientInstantiator
 import software.amazon.smithy.rust.codegen.core.rustlang.Writable
 import software.amazon.smithy.rust.codegen.core.rustlang.docs
 import software.amazon.smithy.rust.codegen.core.rustlang.escape
@@ -49,8 +48,6 @@ internal class EndpointTestGenerator(
             "HashMap" to RuntimeType.HashMap,
             "capture_request" to RuntimeType.captureRequest(runtimeConfig),
         )
-
-    private val instantiator = ClientInstantiator(codegenContext)
 
     private fun EndpointTestCase.docs(): Writable {
         val self = this
@@ -134,7 +131,7 @@ internal class EndpointTestGenerator(
                         value.values.map { member ->
                             writable {
                                 rustTemplate(
-                                    "#{Document}::from(#{value:W})",
+                                    "#{value:W}.into()",
                                     *codegenScope,
                                     "value" to generateValue(member),
                                 )
