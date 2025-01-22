@@ -111,6 +111,10 @@ class RustJmespathShapeTraversalGeneratorTest {
                                     .structs(#{Struct}::builder()
                                         .primitives(primitives.clone())
                                         .build())
+                                    .structs(#{Struct}::builder()
+                                        .integer(1)
+                                        .string("mystring")
+                                        .build())
                                     .build())
                                 .maps(#{EntityMaps}::builder()
                                     .strings("foo", "foo_oo")
@@ -333,7 +337,14 @@ class RustJmespathShapeTraversalGeneratorTest {
             assertions: RustWriter.() -> Unit,
         ) = testCase("wildcard_$name", expression, assertions)
 
-        test("basic_case", "lists.structs[*].[primitives.string, string]") {
+        test("wildcard_followed_by_multiselect", "lists.structs[*].[string, primitives.string][]") {
+        }
+
+        // the `primitives` field is `None` in structs obtained via `lists.structs[?string == 'mystring']`
+        test("filterproj_followed_by_multiselect_none", "lists.structs[?string == 'mystring'].[primitives.string, primitives.requiredString][]") {
+        }
+
+        test("filterproj_followed_by_multiselect_some", "lists.structs[?string == 'mystring'].[integer, primitives.integer][]") {
         }
     }
 
@@ -382,7 +393,7 @@ class RustJmespathShapeTraversalGeneratorTest {
             assertions: RustWriter.() -> Unit,
         ) = testCase("traverse_fn_$name", expression, assertions)
 
-        test("list_length", "length(lists.structs[])", simple("assert_eq!(1, result);"))
+        test("list_length", "length(lists.structs[])", simple("assert_eq!(2, result);"))
         test("string_length", "length(primitives.string)", simple("assert_eq!(4, result);"))
 
         test("string_contains_false", "contains(primitives.string, 'foo')", expectFalse)
@@ -523,7 +534,7 @@ class RustJmespathShapeTraversalGeneratorTest {
         ) = testCase("traverse_filter_projection_$name", expression, assertions)
 
         test("boollit", "lists.structs[?`true`]") {
-            rust("assert_eq!(1, result.len());")
+            rust("assert_eq!(2, result.len());")
         }
         test("intcmp", "lists.structs[?primitives.integer > `0`]") {
             rust("assert_eq!(1, result.len());")
