@@ -109,20 +109,32 @@ class RustJmespathShapeTraversalGeneratorTest {
                                     .enums(#{Enum}::Two)
                                     .int_enums(2)
                                     .structs(#{Struct}::builder()
+                                        .required_integer(1)
                                         .primitives(primitives.clone())
-                                        .build())
+                                        .sub_structs(#{SubStruct}::builder().sub_struct_primitives(primitives.clone()).build())
+                                        .sub_structs(#{SubStruct}::builder().sub_struct_primitives(
+                                            #{EntityPrimitives}::builder()
+                                                .required_boolean(false)
+                                                .required_string("why")
+                                                .build()
+                                                .unwrap())
+                                            .build())
+                                        .build()
+                                        .unwrap())
                                     .structs(#{Struct}::builder()
+                                        .required_integer(2)
                                         .integer(1)
                                         .string("foo")
-                                        .build())
+                                        .build()
+                                        .unwrap())
                                     .build())
                                 .maps(#{EntityMaps}::builder()
                                     .strings("foo", "foo_oo")
                                     .strings("bar", "bar_ar")
                                     .booleans("foo", true)
                                     .booleans("bar", false)
-                                    .structs("foo", #{Struct}::builder().integer(5).build())
-                                    .structs("bar", #{Struct}::builder().primitives(primitives).integer(7).build())
+                                    .structs("foo", #{Struct}::builder().required_integer(2).integer(5).build().unwrap())
+                                    .structs("bar", #{Struct}::builder().required_integer(3).primitives(primitives).integer(7).build().unwrap())
                                     .build())
                                 .build()
                         }
@@ -336,17 +348,25 @@ class RustJmespathShapeTraversalGeneratorTest {
             assertions: RustWriter.() -> Unit,
         ) = testCase("traverse_$name", expression, assertions)
 
+        // Each struct in projection sets at least one of the selected fields, e.g. either `string` or `primitives.string` is `Some`.
         test("wildcard_projection_followed_by_multiselectlists", "lists.structs[*].[string, primitives.string][]") {
+            rust("""assert_eq!(vec!["test", "foo"], result);""")
         }
 
-        // the `primitives` field is `None` in structs obtained via `lists.structs[?string == 'mystring']`
-        test("filter_projection_followed_by_multiselectlists_none", "lists.structs[?string == 'mystring'].[primitives.string, primitives.requiredString][]") {
+        // The `primitives` field is `None` in structs obtained via `lists.structs[?string == 'foo']`
+        test("filter_projection_followed_by_multiselectlists_empty", "lists.structs[?string == 'foo'].[primitives.string, primitives.requiredString][]") {
+            rust("assert!(result.is_empty());")
         }
 
-        test("filter_projection_followed_by_multiselectlists_some", "lists.structs[?string == 'mystring'].[integer, primitives.integer][]") {
+        // Unlike the previous, the `integer` field is set in a struct in the projection.
+        test("filter_projection_followed_by_multiselectlists", "lists.structs[?string == 'foo'].[integer, primitives.integer][]") {
+            rust("assert_eq!(vec![&1], result);")
         }
 
         test("object_projection_followed_by_multiselectlists", "maps.structs.*.[integer, primitives.integer][]") {
+            rust("let mut result = result;")
+            rust("result.sort();")
+            rust("assert_eq!(vec![&4, &5, &7], result);")
         }
     }
 
@@ -512,19 +532,25 @@ class RustJmespathShapeTraversalGeneratorTest {
             assertions: RustWriter.() -> Unit,
         ) = testCase("traverse_obj_projection_$name", expression, assertions)
 
-        test("traverse_obj_projection_simple", "maps.booleans.*") {
+        test("simple", "maps.booleans.*") {
             rust("assert_eq!(2, result.len());")
             // Order is non-deterministic because we're getting the values of a hash map
             rust("assert_eq!(1, result.iter().filter(|&&&b| b == true).count());")
             rust("assert_eq!(1, result.iter().filter(|&&&b| b == false).count());")
         }
-        test("traverse_obj_projection_continued", "maps.structs.*.integer") {
-            rust("assert_eq!(2, result.len());")
-            rust("let mut result= result;")
+        test("continued", "maps.structs.*.integer") {
+            rust("let mut result = result;")
             rust("result.sort();")
             rust("assert_eq!(vec![&5, &7], result);")
         }
-        test("traverse_obj_projection_complex", "length(maps.structs.*.strings) == `0`", expectTrue)
+        test("complex", "length(maps.structs.*.strings) == `0`", expectTrue)
+
+        // Derived from https://github.com/awslabs/aws-sdk-rust/blob/8848f51e58fead8d230a0c15f0434b2812825c38/aws-models/ses.json#L2985
+        test("followed_by_required_field", "maps.structs.*.requiredInteger") {
+            rust("let mut result = result;")
+            rust("result.sort();")
+            rust("assert_eq!(vec![&2, &3], result);")
+        }
 
         unsupported("primitives.integer.*", "Object projection is only supported on map types")
         unsupported("lists.structs[?`true`].*", "Object projection cannot be done on computed maps")
@@ -613,6 +639,14 @@ class RustJmespathShapeTraversalGeneratorTest {
             "(length(lists.structs[?!(integer < `0`) && integer >= `0` || `false`]) == `5`) == contains(lists.integers, length(maps.structs.*.strings))",
             itCompiles,
         )
+
+        // Derived from https://github.com/awslabs/aws-sdk-rust/blob/8848f51e58fead8d230a0c15f0434b2812825c38/aws-models/auto-scaling.json#L4202
+        // The first argument to `contains` evaluates to `Some([true])` since `length(...)` is 1 and `requiredInteger` in that struct is 1.
+        test(
+            "2",
+            "contains(lists.structs[].[length(subStructs[?subStructPrimitives.requiredString=='why']) >= requiredInteger][], `true`)",
+            expectTrue,
+        )
     }
 
     private fun testModel() =
@@ -693,6 +727,8 @@ class RustJmespathShapeTraversalGeneratorTest {
         }
 
         structure Struct {
+            @required
+            requiredInteger: Integer,
             primitives: EntityPrimitives,
             strings: StringList,
             integer: Integer,
