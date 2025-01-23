@@ -44,7 +44,6 @@ import software.amazon.smithy.rust.codegen.core.rustlang.asRef
 import software.amazon.smithy.rust.codegen.core.rustlang.plus
 import software.amazon.smithy.rust.codegen.core.rustlang.render
 import software.amazon.smithy.rust.codegen.core.rustlang.rust
-import software.amazon.smithy.rust.codegen.core.rustlang.rustBlock
 import software.amazon.smithy.rust.codegen.core.rustlang.rustBlockTemplate
 import software.amazon.smithy.rust.codegen.core.rustlang.rustTemplate
 import software.amazon.smithy.rust.codegen.core.rustlang.stripOuter
@@ -907,33 +906,62 @@ class RustJmespathShapeTraversalGenerator(
                     output = writable {},
                 )
             } else {
-                generate(expr.right, listOf(TraversalBinding.Global("_v", TraversedShape.from(model, leftTarget))), context)
+                generate(expr.right, listOf(TraversalBinding.Global("_v", TraversedShape.from(model, leftTarget))), context.copy(retainOption = true))
+            }
+
+        val (projectionType, flattenNeeded) =
+            when {
+                right.isArray() -> right.outputType.stripOuter<RustType.Reference>() to true
+                else -> RustType.Vec(right.outputType.asRef()) to false
             }
 
         val ident = safeNamer.safeName("_oprj")
         return GeneratedExpression(
             identifier = ident,
             outputShape = TraversedShape.Array(null, right.outputShape),
-            outputType = RustType.Vec(right.outputType),
+            outputType =
+                if (projectionType is RustType.Vec) {
+                    if (projectionType.member is RustType.Option) {
+                        RustType.Vec((projectionType.member as RustType.Option).member)
+                    } else {
+                        projectionType
+                    }
+                } else {
+                    projectionType
+                },
             output =
                 left.output +
                     writable {
                         if (expr.right is CurrentExpression) {
                             rustTemplate("let $ident = ${left.identifier}.values().collect::<#{Vec}<_>>();", *preludeScope)
                         } else {
-                            rustBlock("let $ident = ${left.identifier}.values().flat_map(") {
+                            withBlock("let $ident = ${left.identifier}.values().flat_map({", "})") {
                                 rustBlockTemplate(
-                                    "fn map(_v: &#{Left}) -> #{Option}<#{Right}>",
+                                    if (right.outputType is RustType.Option) {
+                                        "fn map(_v: &#{Left}) -> #{Right}"
+                                    } else {
+                                        "fn map(_v: &#{Left}) -> #{Option}<#{Right}>"
+                                    },
                                     *preludeScope,
                                     "Left" to leftTargetSym,
                                     "Right" to right.outputType,
                                 ) {
                                     right.output(this)
-                                    rustTemplate("#{Some}(${right.identifier})", *preludeScope)
+                                    if (right.outputType is RustType.Option) {
+                                        rustTemplate(right.identifier)
+                                    } else {
+                                        rustTemplate("#{Some}(${right.identifier})", *preludeScope)
+                                    }
                                 }
                                 rust("map")
                             }
-                            rustTemplate(").collect::<#{Vec}<_>>();", *preludeScope)
+                            if (flattenNeeded) {
+                                rust(".flatten()")
+                                if (right.outputType is RustType.Vec && right.outputType.member is RustType.Option) {
+                                    rust(".flatten()")
+                                }
+                            }
+                            rustTemplate(".collect::<#{Vec}<_>>();", *preludeScope)
                         }
                     },
         )

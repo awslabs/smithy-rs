@@ -113,7 +113,7 @@ class RustJmespathShapeTraversalGeneratorTest {
                                         .build())
                                     .structs(#{Struct}::builder()
                                         .integer(1)
-                                        .string("mystring")
+                                        .string("foo")
                                         .build())
                                     .build())
                                 .maps(#{EntityMaps}::builder()
@@ -122,6 +122,7 @@ class RustJmespathShapeTraversalGeneratorTest {
                                     .booleans("foo", true)
                                     .booleans("bar", false)
                                     .structs("foo", #{Struct}::builder().integer(5).build())
+                                    .structs("bar", #{Struct}::builder().primitives(primitives).integer(7).build())
                                     .build())
                                 .build()
                         }
@@ -346,6 +347,9 @@ class RustJmespathShapeTraversalGeneratorTest {
 
         test("filterproj_followed_by_multiselect_some", "lists.structs[?string == 'mystring'].[integer, primitives.integer][]") {
         }
+
+        test("objproj_followed_by_multiselect_some", "maps.structs.*.[integer, primitives.integer][]") {
+        }
     }
 
     private fun TestCase.flattenExpressions() {
@@ -517,7 +521,7 @@ class RustJmespathShapeTraversalGeneratorTest {
             rust("assert_eq!(1, result.iter().filter(|&&&b| b == false).count());")
         }
         test("traverse_obj_projection_continued", "maps.structs.*.integer") {
-            rust("assert_eq!(1, result.len());")
+            rust("assert_eq!(2, result.len());")
             rust("assert_eq!(5, **result.get(0).unwrap());")
         }
         test("traverse_obj_projection_complex", "length(maps.structs.*.strings) == `0`", expectTrue)
