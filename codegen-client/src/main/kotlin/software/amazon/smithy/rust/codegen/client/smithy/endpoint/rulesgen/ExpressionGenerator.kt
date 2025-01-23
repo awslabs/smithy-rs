@@ -60,6 +60,8 @@ class ExpressionGenerator(
                 } else {
                     try {
                         when (ref.type()) {
+                            // This ensures we obtain a `&str`, regardless of whether `ref.name.rustName()` returns a `String` or a `&str`.
+                            // Typically, we don't know which type will be returned due to code generation.
                             is StringType -> rust("${ref.name.rustName()}.as_ref() as &str")
                             else -> rust(ref.name.rustName())
                         }
