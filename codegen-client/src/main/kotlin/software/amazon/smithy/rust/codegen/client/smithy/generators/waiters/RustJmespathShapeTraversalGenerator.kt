@@ -822,11 +822,7 @@ class RustJmespathShapeTraversalGenerator(
                 outputShape = TraversedShape.Array(null, right.outputShape),
                 outputType =
                     if (projectionType is RustType.Vec) {
-                        if (projectionType.member is RustType.Option) {
-                            RustType.Vec((projectionType.member as RustType.Option).member)
-                        } else {
-                            projectionType
-                        }
+                        projectionType.flattenOptionalCollectionValue()
                     } else {
                         projectionType
                     },
@@ -921,11 +917,7 @@ class RustJmespathShapeTraversalGenerator(
             outputShape = TraversedShape.Array(null, right.outputShape),
             outputType =
                 if (projectionType is RustType.Vec) {
-                    if (projectionType.member is RustType.Option) {
-                        RustType.Vec((projectionType.member as RustType.Option).member)
-                    } else {
-                        projectionType
-                    }
+                    projectionType.flattenOptionalCollectionValue()
                 } else {
                     projectionType
                 },
@@ -1050,6 +1042,33 @@ private fun RustType.collectionValue(): RustType =
         is RustType.Vec -> member
         is RustType.HashSet -> member
         is RustType.HashMap -> member
+        else -> throw RuntimeException("expected collection type")
+    }
+
+private fun RustType.flattenOptionalCollectionValue(): RustType =
+    when (this) {
+        is RustType.Reference -> member.flattenOptionalCollectionValue()
+        is RustType.Vec -> {
+            if (member is RustType.Option) {
+                RustType.Vec((member as RustType.Option).member)
+            } else {
+                this
+            }
+        }
+        is RustType.HashSet -> {
+            if (member is RustType.Option) {
+                RustType.HashSet((member as RustType.Option).member)
+            } else {
+                this
+            }
+        }
+        is RustType.HashMap -> {
+            if (member is RustType.Option) {
+                RustType.HashMap(this.key, (member as RustType.Option).member)
+            } else {
+                this
+            }
+        }
         else -> throw RuntimeException("expected collection type")
     }
 
