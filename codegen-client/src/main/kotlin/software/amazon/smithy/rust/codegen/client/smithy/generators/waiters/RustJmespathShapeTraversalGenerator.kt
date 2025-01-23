@@ -511,7 +511,7 @@ class RustJmespathShapeTraversalGenerator(
                     outputType = RustType.Option(targetSym.rustType().asRef()),
                     output =
                         writable {
-                            rust(
+                            rustTemplate(
                                 if (globalBinding.rustName.startsWith("_fld")) {
                                     if (memberSym.isOptional()) {
                                         "let $ident = ${globalBinding.rustName}.and_then(|v| v.${memberSym.name}.as_ref());"
@@ -519,8 +519,13 @@ class RustJmespathShapeTraversalGenerator(
                                         "let $ident = ${globalBinding.rustName}.map(|v| &v.${memberSym.name});"
                                     }
                                 } else {
-                                    "let $ident = ${globalBinding.rustName}.${memberSym.name}.as_ref();"
+                                    if (memberSym.isOptional()) {
+                                        "let $ident = ${globalBinding.rustName}.${memberSym.name}.as_ref();"
+                                    } else {
+                                        "let $ident = #{Some}(&${globalBinding.rustName}.${memberSym.name});"
+                                    }
                                 },
+                                *preludeScope,
                             )
                         },
                 )
