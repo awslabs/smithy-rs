@@ -244,9 +244,6 @@ class RustJmespathShapeTraversalGeneratorTest {
     private val itCompiles = simple("")
 
     @Test
-    fun single() = integrationTest { wildcardExpressions() }
-
-    @Test
     fun all() =
         integrationTest {
             fieldExpressions()
@@ -260,6 +257,7 @@ class RustJmespathShapeTraversalGeneratorTest {
             filterProjections()
             booleanOperations()
             multiSelectLists()
+            projectionFollowedByMultiSelectLists()
             complexCombinationsOfFeatures()
 
             unsupported("&('foo')", "Expression type expressions")
@@ -331,24 +329,24 @@ class RustJmespathShapeTraversalGeneratorTest {
         )
     }
 
-    private fun TestCase.wildcardExpressions() {
+    private fun TestCase.projectionFollowedByMultiSelectLists() {
         fun test(
             name: String,
             expression: String,
             assertions: RustWriter.() -> Unit,
-        ) = testCase("wildcard_$name", expression, assertions)
+        ) = testCase("traverse_$name", expression, assertions)
 
-        test("wildcard_followed_by_multiselect", "lists.structs[*].[string, primitives.string][]") {
+        test("wildcard_projection_followed_by_multiselectlists", "lists.structs[*].[string, primitives.string][]") {
         }
 
         // the `primitives` field is `None` in structs obtained via `lists.structs[?string == 'mystring']`
-        test("filterproj_followed_by_multiselect_none", "lists.structs[?string == 'mystring'].[primitives.string, primitives.requiredString][]") {
+        test("filter_projection_followed_by_multiselectlists_none", "lists.structs[?string == 'mystring'].[primitives.string, primitives.requiredString][]") {
         }
 
-        test("filterproj_followed_by_multiselect_some", "lists.structs[?string == 'mystring'].[integer, primitives.integer][]") {
+        test("filter_projection_followed_by_multiselectlists_some", "lists.structs[?string == 'mystring'].[integer, primitives.integer][]") {
         }
 
-        test("objproj_followed_by_multiselect_some", "maps.structs.*.[integer, primitives.integer][]") {
+        test("object_projection_followed_by_multiselectlists", "maps.structs.*.[integer, primitives.integer][]") {
         }
     }
 
@@ -522,7 +520,9 @@ class RustJmespathShapeTraversalGeneratorTest {
         }
         test("traverse_obj_projection_continued", "maps.structs.*.integer") {
             rust("assert_eq!(2, result.len());")
-            rust("assert_eq!(5, **result.get(0).unwrap());")
+            rust("let mut result= result;")
+            rust("result.sort();")
+            rust("assert_eq!(vec![&5, &7], result);")
         }
         test("traverse_obj_projection_complex", "length(maps.structs.*.strings) == `0`", expectTrue)
 
