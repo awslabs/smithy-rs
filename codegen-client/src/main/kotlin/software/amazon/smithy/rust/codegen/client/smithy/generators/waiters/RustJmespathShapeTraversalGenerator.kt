@@ -38,6 +38,7 @@ import software.amazon.smithy.model.traits.EnumTrait
 import software.amazon.smithy.rust.codegen.client.smithy.ClientCodegenContext
 import software.amazon.smithy.rust.codegen.core.rustlang.Attribute
 import software.amazon.smithy.rust.codegen.core.rustlang.RustType
+import software.amazon.smithy.rust.codegen.core.rustlang.RustWriter
 import software.amazon.smithy.rust.codegen.core.rustlang.SafeNamer
 import software.amazon.smithy.rust.codegen.core.rustlang.Writable
 import software.amazon.smithy.rust.codegen.core.rustlang.asRef
@@ -53,6 +54,7 @@ import software.amazon.smithy.rust.codegen.core.rustlang.writable
 import software.amazon.smithy.rust.codegen.core.smithy.RuntimeType.Companion.preludeScope
 import software.amazon.smithy.rust.codegen.core.smithy.isOptional
 import software.amazon.smithy.rust.codegen.core.smithy.rustType
+import software.amazon.smithy.rust.codegen.core.util.UNREACHABLE
 import software.amazon.smithy.rust.codegen.core.util.dq
 import software.amazon.smithy.rust.codegen.core.util.hasTrait
 import software.amazon.smithy.rust.codegen.core.util.orNull
@@ -254,7 +256,14 @@ sealed class TraversalBinding {
 typealias TraversalBindings = List<TraversalBinding>
 
 /**
- * Bag of metadata accessible from the generate* methods that can affect how Rust JmesPath expression code should be generated.
+ * Bag of metadata accessible from the generate* methods that can affect how the resulting Rust code should be generated.
+ *
+ * [retainOption] determines whether `Option`s are preserved in the context of a projected list.
+ * Specifically, when applying selectors (used in multi-select lists) to each entity on the left-hand side of a
+ * projection, we want the resulting map function to return `Option<Vec<Option<&T>>>` (when `retainOption` is true)
+ * rather than `Option<Vec<&T>>` (when it is false).
+ * This distinction is crucial because the latter could incorrectly result in `None` if any of the selectors
+ * refer to a field with a `None` value.
  */
 data class TraversalContext(val retainOption: Boolean)
 
@@ -346,6 +355,9 @@ class RustJmespathShapeTraversalGenerator(
         bindings: TraversalBindings,
         context: TraversalContext,
     ): GeneratedExpression {
+        // When applying a comparator to the left and right operands, both must be non-optional types.
+        // For this, we avoid retaining `Option` values, even when `generateComparator` is invoked
+        // further down the chain from a projection expression.
         val left = generate(expr.left, bindings, context.copy(retainOption = false))
         val right = generate(expr.right, bindings, context.copy(retainOption = false))
         return generateCompare(safeNamer, left, right, expr.comparator.toString())
@@ -514,6 +526,8 @@ class RustJmespathShapeTraversalGenerator(
                             rustTemplate(
                                 if (globalBinding.rustName.startsWith("_fld")) {
                                     if (memberSym.isOptional()) {
+                                        // This ensures that `ident` has a type with a single level of `Option`, rather than being
+                                        // doubly nested as `Option<Option<...>>`.
                                         "let $ident = ${globalBinding.rustName}.and_then(|v| v.${memberSym.name}.as_ref());"
                                     } else {
                                         "let $ident = ${globalBinding.rustName}.map(|v| &v.${memberSym.name});"
@@ -707,20 +721,22 @@ class RustJmespathShapeTraversalGenerator(
                 is FlattenExpression -> generate(maybeFlatten.expression, bindings, context)
                 else -> generate(expr.left, bindings, context)
             }
-        val leftTarget =
-            (
-                left.outputShape as? TraversedShape.Array
-                    ?: throw InvalidJmesPathTraversalException("Left side of the flatten projection MUST resolve to a list or set shape")
-            ).member
-        val leftTargetSym: Any = (leftTarget.shape?.let { symbolProvider.toSymbol(it) }) ?: left.outputType
 
         // Short-circuit in the case where the projection is unnecessary
         if (left.isArray() && expr.right is CurrentExpression) {
             return left
         }
 
+        val leftTarget =
+            (
+                left.outputShape as? TraversedShape.Array
+                    ?: throw InvalidJmesPathTraversalException("Left side of the flatten projection MUST resolve to a list or set shape")
+            ).member
+        val leftTargetSym: Any = (leftTarget.shape?.let { symbolProvider.toSymbol(it) }) ?: left.outputType
+        val leftBinding = "_v"
+
         val right =
-            generate(expr.right, listOf(TraversalBinding.Global("v", leftTarget)), context.copy(retainOption = true))
+            generate(expr.right, listOf(TraversalBinding.Global(leftBinding, leftTarget)), context.copy(retainOption = true))
 
         // If the right expression results in a collection type, then the resulting vec will need to get flattened.
         // Otherwise, you'll get `Vec<&Vec<T>>` instead of `Vec<&T>`, which causes later projections to fail to compile.
@@ -736,11 +752,7 @@ class RustJmespathShapeTraversalGenerator(
                 outputShape = right.outputShape,
                 outputType =
                     if (projectionType is RustType.Vec) {
-                        if (projectionType.member is RustType.Option) {
-                            RustType.Vec((projectionType.member as RustType.Option).member)
-                        } else {
-                            projectionType
-                        }
+                        projectionType.flattenOptionalCollectionValue()
                     } else {
                         projectionType
                     },
@@ -749,30 +761,12 @@ class RustJmespathShapeTraversalGenerator(
                         writable {
                             rust("let $ident = ${left.identifier}.iter()")
                             withBlock(".flat_map(|v| {", "})") {
-                                Attribute.AllowClippyLetAndReturn.render(this)
-                                rustBlockTemplate(
-                                    // map has to have Option since the map function body can have ?
-                                    if (right.outputType is RustType.Option) {
-                                        "fn map(v: &#{Left}) -> #{Right}"
-                                    } else {
-                                        "fn map(v: &#{Left}) -> #{Option}<#{Right}>"
-                                    },
-                                    *preludeScope,
-                                    "Left" to leftTargetSym,
-                                    "Right" to right.outputType,
-                                ) {
-                                    right.output(this)
-                                    if (right.outputType is RustType.Option) {
-                                        rustTemplate(right.identifier)
-                                    } else {
-                                        rustTemplate("#{Some}(${right.identifier})", *preludeScope)
-                                    }
-                                }
+                                renderProjectionMap(this, leftBinding, leftTargetSym, right)
                                 rust("map(v)")
                             }
                             if (flattenNeeded) {
                                 rust(".flatten()")
-                                if (right.outputType is RustType.Vec && right.outputType.member is RustType.Option) {
+                                if (right.outputType.isCollectionOfOptions()) {
                                     rust(".flatten()")
                                 }
                             }
@@ -794,6 +788,7 @@ class RustJmespathShapeTraversalGenerator(
 
         val leftTarget = (left.outputShape as TraversedShape.Array).member
         val leftTargetSym = symbolProvider.toSymbol(leftTarget.shape)
+        val leftBinding = "_v"
 
         val right =
             if (expr.right is CurrentExpression) {
@@ -802,7 +797,7 @@ class RustJmespathShapeTraversalGenerator(
                     output = writable {},
                 )
             } else {
-                generate(expr.right, listOf(TraversalBinding.Global("_v", leftTarget)), context.copy(retainOption = true))
+                generate(expr.right, listOf(TraversalBinding.Global(leftBinding, leftTarget)), context.copy(retainOption = true))
             }
 
         val comparison = generate(expr.comparison, listOf(TraversalBinding.Global("_v", leftTarget)), context)
@@ -843,28 +838,12 @@ class RustJmespathShapeTraversalGenerator(
                             }
                             if (expr.right !is CurrentExpression) {
                                 withBlock(".flat_map({", "})") {
-                                    rustBlockTemplate(
-                                        if (right.outputType is RustType.Option) {
-                                            "fn map(_v: &#{Left}) -> #{Right}"
-                                        } else {
-                                            "fn map(_v: &#{Left}) -> #{Option}<#{Right}>"
-                                        },
-                                        *preludeScope,
-                                        "Left" to leftTargetSym,
-                                        "Right" to right.outputType,
-                                    ) {
-                                        right.output(this)
-                                        if (right.outputType is RustType.Option) {
-                                            rustTemplate(right.identifier)
-                                        } else {
-                                            rustTemplate("#{Some}(${right.identifier})", *preludeScope)
-                                        }
-                                    }
+                                    renderProjectionMap(this, leftBinding, leftTargetSym, right)
                                     rust("map")
                                 }
                                 if (flattenNeeded) {
                                     rust(".flatten()")
-                                    if (right.outputType is RustType.Vec && right.outputType.member is RustType.Option) {
+                                    if (right.outputType.isCollectionOfOptions()) {
                                         rust(".flatten()")
                                     }
                                 }
@@ -893,6 +872,7 @@ class RustJmespathShapeTraversalGenerator(
 
         val leftTarget = model.expectShape((left.outputShape.shape as MapShape).value.target)
         val leftTargetSym = symbolProvider.toSymbol(leftTarget)
+        val leftBinding = "_v"
 
         val right =
             if (expr.right is CurrentExpression) {
@@ -902,7 +882,7 @@ class RustJmespathShapeTraversalGenerator(
                     output = writable {},
                 )
             } else {
-                generate(expr.right, listOf(TraversalBinding.Global("_v", TraversedShape.from(model, leftTarget))), context.copy(retainOption = true))
+                generate(expr.right, listOf(TraversalBinding.Global(leftBinding, TraversedShape.from(model, leftTarget))), context.copy(retainOption = true))
             }
 
         val (projectionType, flattenNeeded) =
@@ -928,28 +908,12 @@ class RustJmespathShapeTraversalGenerator(
                             rustTemplate("let $ident = ${left.identifier}.values().collect::<#{Vec}<_>>();", *preludeScope)
                         } else {
                             withBlock("let $ident = ${left.identifier}.values().flat_map({", "})") {
-                                rustBlockTemplate(
-                                    if (right.outputType is RustType.Option) {
-                                        "fn map(_v: &#{Left}) -> #{Right}"
-                                    } else {
-                                        "fn map(_v: &#{Left}) -> #{Option}<#{Right}>"
-                                    },
-                                    *preludeScope,
-                                    "Left" to leftTargetSym,
-                                    "Right" to right.outputType,
-                                ) {
-                                    right.output(this)
-                                    if (right.outputType is RustType.Option) {
-                                        rustTemplate(right.identifier)
-                                    } else {
-                                        rustTemplate("#{Some}(${right.identifier})", *preludeScope)
-                                    }
-                                }
+                                renderProjectionMap(this, leftBinding, leftTargetSym, right)
                                 rust("map")
                             }
                             if (flattenNeeded) {
                                 rust(".flatten()")
-                                if (right.outputType is RustType.Vec && right.outputType.member is RustType.Option) {
+                                if (right.outputType.isCollectionOfOptions()) {
                                     rust(".flatten()")
                                 }
                             }
@@ -1019,6 +983,34 @@ internal fun generateCompare(
         }
     }
 
+private fun renderProjectionMap(
+    writer: RustWriter,
+    leftBinding: String,
+    leftTargetSym: Any,
+    right: GeneratedExpression,
+) {
+    writer.apply {
+        Attribute.AllowClippyLetAndReturn.render(this)
+        rustBlockTemplate(
+            if (right.outputType is RustType.Option) {
+                "fn map($leftBinding: &#{Left}) -> #{Right}"
+            } else {
+                "fn map($leftBinding: &#{Left}) -> #{Option}<#{Right}>"
+            },
+            *preludeScope,
+            "Left" to leftTargetSym,
+            "Right" to right.outputType,
+        ) {
+            right.output(this)
+            if (right.outputType is RustType.Option) {
+                rust(right.identifier)
+            } else {
+                rustTemplate("#{Some}(${right.identifier})", *preludeScope)
+            }
+        }
+    }
+}
+
 private fun RustType.dereference(): RustType =
     if (this is RustType.Reference) {
         this.member.dereference()
@@ -1036,6 +1028,13 @@ private fun RustType.isNumber(): Boolean = this.dereference().let { it is RustTy
 
 private fun RustType.isDoubleReference(): Boolean = this is RustType.Reference && this.member is RustType.Reference
 
+private fun RustType.isCollectionOfOptions(): Boolean =
+    try {
+        collectionValue() is RustType.Option
+    } catch (_: RuntimeException) {
+        false
+    }
+
 private fun RustType.collectionValue(): RustType =
     when (this) {
         is RustType.Reference -> member.collectionValue()
@@ -1045,31 +1044,22 @@ private fun RustType.collectionValue(): RustType =
         else -> throw RuntimeException("expected collection type")
     }
 
-private fun RustType.flattenOptionalCollectionValue(): RustType =
-    when (this) {
-        is RustType.Reference -> member.flattenOptionalCollectionValue()
-        is RustType.Vec -> {
-            if (member is RustType.Option) {
-                RustType.Vec((member as RustType.Option).member)
-            } else {
-                this
-            }
-        }
-        is RustType.HashSet -> {
-            if (member is RustType.Option) {
-                RustType.HashSet((member as RustType.Option).member)
-            } else {
-                this
-            }
-        }
-        is RustType.HashMap -> {
-            if (member is RustType.Option) {
-                RustType.HashMap(this.key, (member as RustType.Option).member)
-            } else {
-                this
-            }
-        }
-        else -> throw RuntimeException("expected collection type")
+private fun RustType.flattenOptionalCollectionValue(): RustType {
+    if (this is RustType.Reference) {
+        return flattenOptionalCollectionValue()
     }
+    val collectionValue = collectionValue()
+    if (collectionValue is RustType.Option) {
+        val unwrapped = collectionValue.member
+        return when (this) {
+            is RustType.Vec -> RustType.Vec(unwrapped)
+            is RustType.HashSet -> RustType.HashSet(unwrapped)
+            is RustType.HashMap -> RustType.HashMap(this.key, unwrapped)
+            else -> UNREACHABLE("collectionValue has been obtained, implying this has to be a collection type")
+        }
+    } else {
+        return this
+    }
+}
 
 private fun JmespathExpression.isLiteralNull(): Boolean = this == LiteralExpression.NULL
