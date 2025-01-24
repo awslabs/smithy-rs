@@ -793,7 +793,7 @@ class RustJmespathShapeTraversalGenerator(
         val right =
             if (expr.right is CurrentExpression) {
                 left.copy(
-                    outputType = RustType.Vec(left.outputType.collectionValue().asRef()),
+                    outputType = left.outputType.collectionValue().asRef(),
                     output = writable {},
                 )
             } else {
@@ -806,8 +806,8 @@ class RustJmespathShapeTraversalGenerator(
         }
 
         val (projectionType, flattenNeeded) =
-            when {
-                right.isArray() -> right.outputType.stripOuter<RustType.Reference>() to true
+            when (right.outputType) {
+                is RustType.Vec -> right.outputType.stripOuter<RustType.Reference>() to true
                 else -> RustType.Vec(right.outputType.asRef()) to false
             }
 
@@ -886,8 +886,8 @@ class RustJmespathShapeTraversalGenerator(
             }
 
         val (projectionType, flattenNeeded) =
-            when {
-                right.isArray() -> right.outputType.stripOuter<RustType.Reference>() to true
+            when (right.outputType) {
+                is RustType.Vec -> right.outputType.stripOuter<RustType.Reference>() to true
                 else -> RustType.Vec(right.outputType.asRef()) to false
             }
 
