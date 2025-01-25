@@ -111,6 +111,7 @@ class RustJmespathShapeTraversalGeneratorTest {
                                     .structs(#{Struct}::builder()
                                         .required_integer(1)
                                         .primitives(primitives.clone())
+                                        .strings("lists_structs1_strings1")
                                         .sub_structs(#{SubStruct}::builder().sub_struct_primitives(primitives.clone()).build())
                                         .sub_structs(#{SubStruct}::builder().sub_struct_primitives(
                                             #{EntityPrimitives}::builder()
@@ -133,7 +134,7 @@ class RustJmespathShapeTraversalGeneratorTest {
                                     .strings("bar", "bar_ar")
                                     .booleans("foo", true)
                                     .booleans("bar", false)
-                                    .structs("foo", #{Struct}::builder().required_integer(2).integer(5).build().unwrap())
+                                    .structs("foo", #{Struct}::builder().required_integer(2).integer(5).strings("maps_foo_struct_strings1").build().unwrap())
                                     .structs("bar", #{Struct}::builder().required_integer(3).primitives(primitives).integer(7).build().unwrap())
                                     .build())
                                 .build()
@@ -384,6 +385,10 @@ class RustJmespathShapeTraversalGeneratorTest {
             rust("assert_eq!(1, result.len());")
             rust("assert_eq!(\"test\", result[0]);")
         }
+        test("no_shortcircuit_continued", "lists.structs[].strings") {
+            rust("assert_eq!(1, result.len());")
+            rust("assert_eq!(\"lists_structs1_strings1\", result[0]);")
+        }
         test("nested_flattens", "lists.structs[].subStructs[].subStructPrimitives.string") {
             // it should compile
         }
@@ -543,7 +548,10 @@ class RustJmespathShapeTraversalGeneratorTest {
             rust("result.sort();")
             rust("assert_eq!(vec![&5, &7], result);")
         }
-        test("complex", "length(maps.structs.*.strings) == `0`", expectTrue)
+        test("followed_by_optional_array", "maps.structs.*.strings") {
+            rust("assert_eq!(vec![\"maps_foo_struct_strings1\"], result);")
+        }
+        test("w_function", "length(maps.structs.*.strings) == `1`", expectTrue)
 
         // Derived from https://github.com/awslabs/aws-sdk-rust/blob/8848f51e58fead8d230a0c15f0434b2812825c38/aws-models/ses.json#L2985
         test("followed_by_required_field", "maps.structs.*.requiredInteger") {

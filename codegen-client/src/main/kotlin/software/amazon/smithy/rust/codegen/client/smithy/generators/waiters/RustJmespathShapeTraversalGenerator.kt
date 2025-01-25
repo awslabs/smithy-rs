@@ -54,7 +54,6 @@ import software.amazon.smithy.rust.codegen.core.rustlang.writable
 import software.amazon.smithy.rust.codegen.core.smithy.RuntimeType.Companion.preludeScope
 import software.amazon.smithy.rust.codegen.core.smithy.isOptional
 import software.amazon.smithy.rust.codegen.core.smithy.rustType
-import software.amazon.smithy.rust.codegen.core.util.UNREACHABLE
 import software.amazon.smithy.rust.codegen.core.util.dq
 import software.amazon.smithy.rust.codegen.core.util.hasTrait
 import software.amazon.smithy.rust.codegen.core.util.orNull
@@ -738,42 +737,27 @@ class RustJmespathShapeTraversalGenerator(
         val right =
             generate(expr.right, listOf(TraversalBinding.Global(leftBinding, leftTarget)), context.copy(retainOption = true))
 
-        // If the right expression results in a collection type, then the resulting vec will need to get flattened.
-        // Otherwise, you'll get `Vec<&Vec<T>>` instead of `Vec<&T>`, which causes later projections to fail to compile.
-        val (projectionType, flattenNeeded) =
-            when {
-                right.isArray() -> right.outputType.stripOuter<RustType.Reference>() to true
-                else -> RustType.Vec(right.outputType.asRef()) to false
-            }
+        val (projectionType, flattenNeeded) = projectionType(right)
 
         return safeNamer.safeName("_prj").let { ident ->
             GeneratedExpression(
                 identifier = ident,
                 outputShape = right.outputShape,
-                outputType =
-                    if (projectionType is RustType.Vec) {
-                        projectionType.flattenOptionalCollectionValue()
-                    } else {
-                        projectionType
-                    },
+                outputType = projectionType,
                 output =
                     left.output +
                         writable {
-                            rust("// left is Array? ${left.isArray()}")
-                            rust("// left output T ${left.outputType}")
-                            rust("// right is Array? ${right.isArray()}")
-                            rust("// right output T ${right.outputType}")
-                            rust("// project T $projectionType")
                             rust("let $ident = ${left.identifier}.iter()")
                             withBlock(".flat_map(|v| {", "})") {
-                                renderProjectionMap(this, leftBinding, leftTargetSym, right)
+                                renderMapToProject(this, leftBinding, leftTargetSym, right)
                                 rust("map(v)")
                             }
                             if (flattenNeeded) {
                                 rust(".flatten()")
-                            }
-                            if (right.outputType.isCollectionOfOptions()) {
-                                rust(".flatten()")
+                                // Eliminate temporary `Option` introduced by `retainOption = true` above.
+                                if (right.outputType.isCollectionOfOptions()) {
+                                    rust(".flatten()")
+                                }
                             }
                             rustTemplate(".collect::<#{Vec}<_>>();", *preludeScope)
                         },
@@ -811,20 +795,7 @@ class RustJmespathShapeTraversalGenerator(
             throw InvalidJmesPathTraversalException("The filter expression comparison must result in a boolean")
         }
 
-        val (projectionType, flattenNeeded) =
-            when {
-                right.isArray() && right.outputType is RustType.Vec -> {
-                    // A case like `maps.structs[?`true`].[integer]` where RHS output type (`[integer]`) is `Vec<Option<&T>>`, and we want Vec<&T>
-                    RustType.Vec(right.outputType.member.stripOuter<RustType.Option>()) to true
-                }
-                right.isArray() && right.outputType is RustType.Option -> {
-                    // A case like `maps.structs[?`true`].strings` where RHS (strings) output type (`[strings]`) is `Option<&Vec<T>>`, and we want Vec<&T>
-                    RustType.Vec(right.outputType.member.stripOuter<RustType.Reference>().stripOuter<RustType.Vec>().asRef()) to true
-                }
-                else -> {
-                    RustType.Vec(right.outputType.stripOuter<RustType.Option>()) to false
-                }
-            }
+        val (projectionType, flattenNeeded) = projectionType(right)
 
         return safeNamer.safeName("_fprj").let { ident ->
             GeneratedExpression(
@@ -848,14 +819,13 @@ class RustJmespathShapeTraversalGenerator(
                             }
                             if (expr.right !is CurrentExpression) {
                                 withBlock(".flat_map({", "})") {
-                                    renderProjectionMap(this, leftBinding, leftTargetSym, right)
+                                    renderMapToProject(this, leftBinding, leftTargetSym, right)
                                     rust("map")
                                 }
                                 if (flattenNeeded) {
                                     rust(".flatten()")
-                                    // Eliminate temporary `Option` introduced by `retainOption = true` above
-                                    // before finalizing the evaluation of a filter projection expression.
-                                    if (right.outputType is RustType.Vec) {
+                                    // Eliminate temporary `Option` introduced by `retainOption = true` above.
+                                    if (right.outputType.isCollectionOfOptions()) {
                                         rust(".flatten()")
                                     }
                                 }
@@ -898,20 +868,7 @@ class RustJmespathShapeTraversalGenerator(
                 generate(expr.right, listOf(TraversalBinding.Global(leftBinding, TraversedShape.from(model, leftTarget))), context.copy(retainOption = true))
             }
 
-        val (projectionType, flattenNeeded) =
-            when {
-                right.isArray() && right.outputType is RustType.Vec -> {
-                    // A case like `maps.structs.*.[integer]` where RHS output type (`[integer]`) is `Vec<Option<&T>>`, and we want Vec<&T>
-                    RustType.Vec(right.outputType.member.stripOuter<RustType.Option>()) to true
-                }
-                right.isArray() && right.outputType is RustType.Option -> {
-                    // A case like `maps.structs.*.strings` where RHS (strings) output type (`[strings]`) is `Option<&Vec<T>>`, and we want Vec<&T>
-                    RustType.Vec(right.outputType.member.stripOuter<RustType.Reference>().stripOuter<RustType.Vec>().asRef()) to true
-                }
-                else -> {
-                    RustType.Vec(right.outputType.stripOuter<RustType.Option>()) to false
-                }
-            }
+        val (projectionType, flattenNeeded) = projectionType(right)
 
         val ident = safeNamer.safeName("_oprj")
         return GeneratedExpression(
@@ -925,14 +882,13 @@ class RustJmespathShapeTraversalGenerator(
                             rustTemplate("let $ident = ${left.identifier}.values().collect::<#{Vec}<_>>();", *preludeScope)
                         } else {
                             withBlock("let $ident = ${left.identifier}.values().flat_map({", "})") {
-                                renderProjectionMap(this, leftBinding, leftTargetSym, right)
+                                renderMapToProject(this, leftBinding, leftTargetSym, right)
                                 rust("map")
                             }
                             if (flattenNeeded) {
                                 rust(".flatten()")
-                                if (right.outputType is RustType.Vec) {
-                                    // Eliminate temporary `Option` introduced by `retainOption = true` above
-                                    // before finalizing the evaluation of an objection projection expression.
+                                if (right.outputType.isCollectionOfOptions()) {
+                                    // Eliminate temporary `Option` introduced by `retainOption = true` above.
                                     rust(".flatten()")
                                 }
                             }
@@ -1002,7 +958,7 @@ internal fun generateCompare(
         }
     }
 
-private fun renderProjectionMap(
+private fun renderMapToProject(
     writer: RustWriter,
     leftBinding: String,
     leftTargetSym: Any,
@@ -1029,6 +985,21 @@ private fun renderProjectionMap(
         }
     }
 }
+
+private fun projectionType(right: GeneratedExpression) =
+    when {
+        right.isArray() && right.outputType is RustType.Vec -> {
+            // A case like `maps.structs.*.[integer]` where RHS output type (`[integer]`) is `Vec<Option<&T>>`, and we want Vec<&T>
+            RustType.Vec(right.outputType.member.stripOuter<RustType.Option>()) to true
+        }
+        right.isArray() && right.outputType is RustType.Option -> {
+            // A case like `maps.structs.*.strings` where RHS (strings) output type (`[strings]`) is `Option<&Vec<T>>`, and we want Vec<&T>
+            RustType.Vec(right.outputType.member.stripOuter<RustType.Reference>().stripOuter<RustType.Vec>().asRef()) to true
+        }
+        else -> {
+            RustType.Vec(right.outputType.stripOuter<RustType.Option>()) to false
+        }
+    }
 
 private fun RustType.dereference(): RustType =
     if (this is RustType.Reference) {
@@ -1062,23 +1033,5 @@ private fun RustType.collectionValue(): RustType =
         is RustType.HashMap -> member
         else -> throw RuntimeException("expected collection type")
     }
-
-private fun RustType.flattenOptionalCollectionValue(): RustType {
-    if (this is RustType.Reference) {
-        return flattenOptionalCollectionValue()
-    }
-    val collectionValue = collectionValue()
-    if (collectionValue is RustType.Option) {
-        val unwrapped = collectionValue.member
-        return when (this) {
-            is RustType.Vec -> RustType.Vec(unwrapped)
-            is RustType.HashSet -> RustType.HashSet(unwrapped)
-            is RustType.HashMap -> RustType.HashMap(this.key, unwrapped)
-            else -> UNREACHABLE("collectionValue has been obtained, implying this has to be a collection type")
-        }
-    } else {
-        return this
-    }
-}
 
 private fun JmespathExpression.isLiteralNull(): Boolean = this == LiteralExpression.NULL
