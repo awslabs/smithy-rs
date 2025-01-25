@@ -759,6 +759,11 @@ class RustJmespathShapeTraversalGenerator(
                 output =
                     left.output +
                         writable {
+                            rust("// left is Array? ${left.isArray()}")
+                            rust("// left output T ${left.outputType}")
+                            rust("// right is Array? ${right.isArray()}")
+                            rust("// right output T ${right.outputType}")
+                            rust("// project T $projectionType")
                             rust("let $ident = ${left.identifier}.iter()")
                             withBlock(".flat_map(|v| {", "})") {
                                 renderProjectionMap(this, leftBinding, leftTargetSym, right)
@@ -766,9 +771,9 @@ class RustJmespathShapeTraversalGenerator(
                             }
                             if (flattenNeeded) {
                                 rust(".flatten()")
-                                if (right.outputType.isCollectionOfOptions()) {
-                                    rust(".flatten()")
-                                }
+                            }
+                            if (right.outputType.isCollectionOfOptions()) {
+                                rust(".flatten()")
                             }
                             rustTemplate(".collect::<#{Vec}<_>>();", *preludeScope)
                         },
@@ -794,6 +799,7 @@ class RustJmespathShapeTraversalGenerator(
             if (expr.right is CurrentExpression) {
                 left.copy(
                     outputType = left.outputType.collectionValue().asRef(),
+                    outputShape = leftTarget,
                     output = writable {},
                 )
             } else {
@@ -806,21 +812,25 @@ class RustJmespathShapeTraversalGenerator(
         }
 
         val (projectionType, flattenNeeded) =
-            when (right.outputType) {
-                is RustType.Vec -> right.outputType.stripOuter<RustType.Reference>() to true
-                else -> RustType.Vec(right.outputType.asRef()) to false
+            when {
+                right.isArray() && right.outputType is RustType.Vec -> {
+                    // A case like `maps.structs[?`true`].[integer]` where RHS output type (`[integer]`) is `Vec<Option<&T>>`, and we want Vec<&T>
+                    RustType.Vec(right.outputType.member.stripOuter<RustType.Option>()) to true
+                }
+                right.isArray() && right.outputType is RustType.Option -> {
+                    // A case like `maps.structs[?`true`].strings` where RHS (strings) output type (`[strings]`) is `Option<&Vec<T>>`, and we want Vec<&T>
+                    RustType.Vec(right.outputType.member.stripOuter<RustType.Reference>().stripOuter<RustType.Vec>().asRef()) to true
+                }
+                else -> {
+                    RustType.Vec(right.outputType.stripOuter<RustType.Option>()) to false
+                }
             }
 
         return safeNamer.safeName("_fprj").let { ident ->
             GeneratedExpression(
                 identifier = ident,
                 outputShape = TraversedShape.Array(null, right.outputShape),
-                outputType =
-                    if (projectionType is RustType.Vec) {
-                        projectionType.flattenOptionalCollectionValue()
-                    } else {
-                        projectionType
-                    },
+                outputType = projectionType,
                 output =
                     left.output +
                         writable {
@@ -843,7 +853,9 @@ class RustJmespathShapeTraversalGenerator(
                                 }
                                 if (flattenNeeded) {
                                     rust(".flatten()")
-                                    if (right.outputType.isCollectionOfOptions()) {
+                                    // Eliminate temporary `Option` introduced by `retainOption = true` above
+                                    // before finalizing the evaluation of a filter projection expression.
+                                    if (right.outputType is RustType.Vec) {
                                         rust(".flatten()")
                                     }
                                 }
@@ -879,6 +891,7 @@ class RustJmespathShapeTraversalGenerator(
                 left.copy(
                     outputType =
                         left.outputType.collectionValue().asRef(),
+                    outputShape = TraversedShape.from(model, leftTarget),
                     output = writable {},
                 )
             } else {
@@ -886,21 +899,25 @@ class RustJmespathShapeTraversalGenerator(
             }
 
         val (projectionType, flattenNeeded) =
-            when (right.outputType) {
-                is RustType.Vec -> right.outputType.stripOuter<RustType.Reference>() to true
-                else -> RustType.Vec(right.outputType.asRef()) to false
+            when {
+                right.isArray() && right.outputType is RustType.Vec -> {
+                    // A case like `maps.structs.*.[integer]` where RHS output type (`[integer]`) is `Vec<Option<&T>>`, and we want Vec<&T>
+                    RustType.Vec(right.outputType.member.stripOuter<RustType.Option>()) to true
+                }
+                right.isArray() && right.outputType is RustType.Option -> {
+                    // A case like `maps.structs.*.strings` where RHS (strings) output type (`[strings]`) is `Option<&Vec<T>>`, and we want Vec<&T>
+                    RustType.Vec(right.outputType.member.stripOuter<RustType.Reference>().stripOuter<RustType.Vec>().asRef()) to true
+                }
+                else -> {
+                    RustType.Vec(right.outputType.stripOuter<RustType.Option>()) to false
+                }
             }
 
         val ident = safeNamer.safeName("_oprj")
         return GeneratedExpression(
             identifier = ident,
             outputShape = TraversedShape.Array(null, right.outputShape),
-            outputType =
-                if (projectionType is RustType.Vec) {
-                    projectionType.flattenOptionalCollectionValue()
-                } else {
-                    projectionType
-                },
+            outputType = projectionType,
             output =
                 left.output +
                     writable {
@@ -913,7 +930,9 @@ class RustJmespathShapeTraversalGenerator(
                             }
                             if (flattenNeeded) {
                                 rust(".flatten()")
-                                if (right.outputType.isCollectionOfOptions()) {
+                                if (right.outputType is RustType.Vec) {
+                                    // Eliminate temporary `Option` introduced by `retainOption = true` above
+                                    // before finalizing the evaluation of an objection projection expression.
                                     rust(".flatten()")
                                 }
                             }
